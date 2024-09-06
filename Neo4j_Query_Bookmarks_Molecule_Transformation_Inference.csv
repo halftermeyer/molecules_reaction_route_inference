@@ -1,0 +1,452 @@
+name,description,query,id,parentId,isFolder
+molecules,,,0,,true
+datasets,,,1,0,true
+Ingredients,,,2,0,true
+ingredient list key constraint,,"CREATE CONSTRAINT ingredients_list IF NOT EXISTS
+FOR (i:Ingredients) REQUIRE (i.list) IS NODE KEY",3,2,false
+iterate 1 step,,"MATCH(m:Molecule)
+MERGE (i:Ingredients {list: [m.gid]})
+MERGE (m)-[:INGREDIENTS]->(i);
+
+MATCH (c:ChemicalTransformation)<-[:REACTANT]-(r)-[ri:INGREDIENTS]->(ing)
+WHERE NOT coalesce (ri.useless, false)
+WITH c, r, collect(ing.list) AS lists
+WITH c, collect(lists) AS listsList
+WITH c, reduce (acc= [[]], lists IN listsList|
+    apoc.coll.flatten([l IN lists | [ll IN acc|
+        apoc.coll.sort(apoc.coll.toSet(apoc.coll.union(l,ll)))]
+        ])
+  ) AS cartesian_prod
+WITH c, apoc.coll.toSet(cartesian_prod) AS clean_prod
+UNWIND clean_prod AS new_ing
+MERGE (i:Ingredients {list: new_ing})
+MERGE (c)-[:INGREDIENTS]->(i);
+
+
+MATCH (m:Molecule)<-[:PRODUCT]-(r)-[ri:INGREDIENTS]->(ing)
+WHERE NOT coalesce (ri.useless, false)
+MERGE (m)-[:INGREDIENTS]->(ing);
+
+MATCH (i1:Ingredients)<-[r1]-(n)-[r2]->(i2:Ingredients)
+WHERE NOT coalesce (r1.useless, false)
+AND NOT coalesce (r2.useless, false)
+AND i1.list <> i2.list
+AND apoc.coll.containsAll(i1.list,i2.list)
+CALL (r1) {
+  SET r1.useless = true
+} IN TRANSACTIONS OF 100 ROWS;",4,2,false
+iterate until converges,,"CALL apoc.periodic.commit('
+  CALL apoc.cypher.runMany(\'
+
+MATCH ()-[r:INGREDIENTS {new:true}]->()
+SET r.new = false;
+
+MATCH(m:Molecule)
+MERGE (i:Ingredients {list: [m.gid]})
+MERGE (m)-[newr:INGREDIENTS]->(i)
+    ON CREATE SET newr.new = true;
+
+MATCH (c:ChemicalTransformation)<-[:REACTANT]-(r)-[ri:INGREDIENTS]->(ing)
+WHERE NOT coalesce (ri.useless, false)
+WITH c, r, collect(ing.list) AS lists
+WITH c, collect(lists) AS listsList
+WITH c, reduce (acc= [[]], lists IN listsList|
+    apoc.coll.flatten([l IN lists | [ll IN acc|
+        apoc.coll.sort(apoc.coll.toSet(apoc.coll.union(l,ll)))]
+        ])
+  ) AS cartesian_prod
+WITH c, apoc.coll.toSet(cartesian_prod) AS clean_prod
+UNWIND clean_prod AS new_ing
+MERGE (i:Ingredients {list: new_ing})
+MERGE (c)-[newr:INGREDIENTS]->(i)
+ ON CREATE SET newr.new = true;
+
+MATCH (m:Molecule)<-[:PRODUCT]-(r)-[ri:INGREDIENTS]->(ing)
+WHERE NOT coalesce (ri.useless, false)
+MERGE (m)-[newr:INGREDIENTS]->(ing)
+    ON CREATE SET newr.new = true;
+
+MATCH (i1:Ingredients)<-[r1]-(n)-[r2]->(i2:Ingredients)
+WHERE NOT coalesce (r1.useless, false)
+AND NOT coalesce (r2.useless, false)
+AND i1.list <> i2.list
+AND apoc.coll.containsAll(i1.list,i2.list)
+//CALL (r1) {
+  SET r1.useless = true
+//} IN TRANSACTIONS OF 100 ROWS;
+
+MATCH ()-[r:INGREDIENTS {new:true}]->()
+WITH count (r) AS limit
+RETURN limit;
+ \',
+  {}) YIELD result
+WITH result
+WHERE result.limit IS NOT null
+WITH result.limit AS limit
+RETURN limit;
+', {parallel:true});",5,2,false
+Show everything,,"MATCH (n)
+OPTIONAL MATCH (n)-[r]->()
+RETURN n, r",6,2,false
+show not useless,,"MATCH (n)
+WHERE NOT (n:Ingredients AND NOT EXISTS { WITH n MATCH ()-[ri]->(n) WHERE NOT coalesce(ri.useless, false) RETURN ri})
+OPTIONAL MATCH (n)-[r]->()
+WHERE NOT coalesce(r.useless, false)
+RETURN n, r",7,2,false
+Show subgraph ingredients,,"WITH [19,20,26,25] AS ings
+// computes everything that can be made from this list of ingredients
+MATCH (a:Molecule|ChemicalTransformation)
+WHERE EXISTS {
+  (a)-[ri:INGREDIENTS]->(i)
+  WHERE NOT coalesce(ri.useless, false)
+  AND apoc.coll.containsAll(ings, i.list)
+}
+OPTIONAL MATCH (a)-[r:PRODUCT|REACTANT]->(b:Molecule|ChemicalTransformation)
+WHERE EXISTS {
+  (b)-[ri:INGREDIENTS]->(i)
+  WHERE NOT coalesce(ri.useless, false)
+  AND apoc.coll.containsAll(ings, i.list)
+}
+RETURN a, r, b",8,2,false
+show if possible with ings on shelf,,"MATCH (:Molecule {gid:1})-[r:INGREDIENTS]->(ing)
+WHERE NOT coalesce(r.useless, false)
+WITH ing.list AS ings
+WHERE apoc.coll.containsAll([17777,2,67],ings)
+WITH ings
+LIMIT 1
+MATCH (a:Molecule|ChemicalTransformation)
+WHERE EXISTS {
+  (a)-[ri:INGREDIENTS]->(i)
+  WHERE NOT coalesce(ri.useless, false)
+  AND apoc.coll.containsAll(ings, i.list)
+}
+OPTIONAL MATCH (a)-[r:PRODUCT|REACTANT]->(b:Molecule|ChemicalTransformation)
+WHERE EXISTS {
+  (b)-[ri:INGREDIENTS]->(i)
+  WHERE NOT coalesce(ri.useless, false)
+  AND apoc.coll.containsAll(ings, i.list)
+}
+RETURN a, r, b",9,2,false
+Recipe (Sept 4th refactor),,,10,0,true
+delete everything,,"MATCH (n)
+CALL (n) {
+  DETACH DELETE n
+} IN TRANSACTIONS OF 1000 ROWS;",11,1,false
+ingest toy graph (no cycle),,"CREATE (:Molecule {gid: 7})-[:REACTANT]->(n3:ChemicalTransformation {gid: 102})<-[:REACTANT]-(:Molecule {gid: 8})-[:_RELATED]->(n12:ChemicalTransformation {gid: 101})<-[:REACTANT]-(:Molecule {gid: 6}),
+(`4`:Molecule {gid: 4})<-[:PRODUCT]-(n3)-[:PRODUCT]->(`3`:Molecule {gid: 3})-[:REACTANT]->(n10:ChemicalTransformation {gid: 104})<-[:REACTANT]-(`4`)-[:REACTANT]->(n14:ChemicalTransformation {gid: 105})-[:PRODUCT]->(:Molecule {gid: 2})-[:REACTANT]->(n18:ChemicalTransformation {gid: 106})-[:PRODUCT]->(:Molecule {gid: 0}),
+(:Molecule {gid: 9})-[:REACTANT]->(n7:ChemicalTransformation {gid: 103})<-[:REACTANT]-(:Molecule {gid: 10}),
+(n7)-[:PRODUCT]->(`4`),
+(n10)-[:PRODUCT]->(:Molecule {gid: 1})-[:REACTANT]->(n18),
+(n12)-[:PRODUCT]->(`3`),
+(:Molecule {gid: 5})-[:REACTANT]->(n14)",12,1,false
+🎯 Ingest toy graph (cycle),,"CREATE (:Molecule {gid: 7})-[:REACTANT]->(n3:ChemicalTransformation {gid: 102})<-[:REACTANT]-(:Molecule {gid: 8})-[:_RELATED]->(n12:ChemicalTransformation {gid: 101})<-[:REACTANT]-(:Molecule {gid: 6}),
+(`4`:Molecule {gid: 4})<-[:PRODUCT]-(n3)-[:PRODUCT]->(`3`:Molecule {gid: 3})-[:REACTANT]->(n10:ChemicalTransformation {gid: 104})<-[:REACTANT]-(`4`)-[:REACTANT]->(n14:ChemicalTransformation {gid: 105})-[:PRODUCT]->(:Molecule {gid: 2})-[:REACTANT]->(n18:ChemicalTransformation {gid: 106})-[:PRODUCT]->(:Molecule {gid: 0}),
+(:Molecule {gid: 9})-[:REACTANT]->(n7:ChemicalTransformation {gid: 103})<-[:REACTANT]-(:Molecule {gid: 10})<-[:PRODUCT]-(n14),
+(n7)-[:PRODUCT]->(`4`),
+(n10)-[:PRODUCT]->(:Molecule {gid: 1})-[:REACTANT]->(n18),
+(n12)-[:PRODUCT]->(`3`),
+(:Molecule {gid: 5})-[:REACTANT]->(n14)",13,1,false
+ingest small,,"MERGE (:Molecule { gid:1 })
+MERGE (:Molecule { gid:2 })
+MERGE (:Molecule { gid:3 })
+MERGE (:Molecule { gid:4 })
+MERGE (:Molecule { gid:5 })
+MERGE (:Molecule { gid:6 })
+MERGE (:Molecule { gid:7 })
+MERGE (:Molecule { gid:8 })
+MERGE (:Molecule { gid:9 })
+MERGE (:Molecule { gid:10 })
+MERGE (:Molecule { gid:11 })
+MERGE (:Molecule { gid:12 })
+MERGE (:Molecule { gid:13 })
+MERGE (:Molecule { gid:14 })
+
+MERGE (:ChemicalTransformation { gid:101 })
+MERGE (:ChemicalTransformation { gid:102 })
+MERGE (:ChemicalTransformation { gid:103 })
+MERGE (:ChemicalTransformation { gid:104 })
+MERGE (:ChemicalTransformation { gid:105 })
+MERGE (:ChemicalTransformation { gid:106 })
+MERGE (:ChemicalTransformation { gid:107 })
+MERGE (:ChemicalTransformation { gid:108 })
+MERGE (:ChemicalTransformation { gid:109 })
+MERGE (:ChemicalTransformation { gid:110 })
+MERGE (:ChemicalTransformation { gid:111 })
+MERGE (:ChemicalTransformation { gid:112 })
+MERGE (:ChemicalTransformation { gid:113 })
+MERGE (:ChemicalTransformation { gid:115 })
+MERGE (:ChemicalTransformation { gid:114 })
+MERGE (:ChemicalTransformation { gid:117 })
+MERGE (:ChemicalTransformation { gid:116 })
+MERGE (:ChemicalTransformation{gid: 118})
+MERGE (:ChemicalTransformation{gid: 119})
+;
+MATCH (a:Molecule { gid:1 }), (b:ChemicalTransformation { gid:101 }) MERGE (a)<-[:PRODUCT]-(b) ;
+MATCH (a:Molecule { gid:1 }), (b:ChemicalTransformation { gid:102 }) MERGE (a)<-[:PRODUCT]-(b) ;
+MATCH (a:Molecule { gid:1 }), (b:ChemicalTransformation { gid:103 }) MERGE (a)<-[:PRODUCT]-(b) ;
+MATCH (a:ChemicalTransformation { gid:101 }), (b:Molecule { gid:2 }) MERGE (a)<-[:REACTANT]-(b) ;
+MATCH (a:ChemicalTransformation { gid:102 }), (b:Molecule { gid:2 }) MERGE (a)<-[:REACTANT]-(b) ;
+MATCH (a:ChemicalTransformation { gid:102 }), (b:Molecule { gid:3 }) MERGE (a)<-[:REACTANT]-(b) ;
+MATCH (a:ChemicalTransformation { gid:103 }), (b:Molecule { gid:2 }) MERGE (a)<-[:REACTANT]-(b) ;
+MATCH (a:ChemicalTransformation { gid:103 }), (b:Molecule { gid:3 }) MERGE (a)<-[:REACTANT]-(b) ;
+MATCH (a:ChemicalTransformation { gid:103 }), (b:Molecule { gid:4 }) MERGE (a)<-[:REACTANT]-(b) ;
+MATCH (a:Molecule { gid:2 }), (b:ChemicalTransformation { gid:104 }) MERGE (a)<-[:PRODUCT]-(b) ;
+MATCH (a:Molecule { gid:4 }), (b:ChemicalTransformation { gid:105 }) MERGE (a)<-[:PRODUCT]-(b) ;
+MATCH (a:Molecule { gid:4 }), (b:ChemicalTransformation { gid:106 }) MERGE (a)<-[:PRODUCT]-(b) ;
+MATCH (a:ChemicalTransformation { gid:104 }), (b:Molecule { gid:5 }) MERGE (a)<-[:REACTANT]-(b) ;
+MATCH (a:ChemicalTransformation { gid:105 }), (b:Molecule { gid:6 }) MERGE (a)<-[:REACTANT]-(b) ;
+MATCH (a:ChemicalTransformation { gid:105 }), (b:Molecule { gid:7 }) MERGE (a)<-[:REACTANT]-(b) ;
+MATCH (a:ChemicalTransformation { gid:106 }), (b:Molecule { gid:8 }) MERGE (a)<-[:REACTANT]-(b) ;
+;
+MATCH (a:Molecule { gid:7 }), (b:ChemicalTransformation { gid:103 }) MERGE (a)<-[:PRODUCT]-(b) ;
+MATCH (a:Molecule { gid:3 }), (b:ChemicalTransformation { gid:107 }) MERGE (a)<-[:PRODUCT]-(b) ;
+MATCH (a:Molecule { gid:2 }), (b:ChemicalTransformation { gid:107 }) MERGE (a)<-[:PRODUCT]-(b) ;
+MATCH (a:Molecule { gid:9 }), (b:ChemicalTransformation { gid:108 }) MERGE (a)<-[:PRODUCT]-(b) ;
+MATCH (a:Molecule { gid:9 }), (b:ChemicalTransformation { gid:109 }) MERGE (a)<-[:PRODUCT]-(b) ;
+MATCH (a:Molecule { gid:8 }), (b:ChemicalTransformation { gid:110 }) MERGE (a)<-[:PRODUCT]-(b) ;
+MATCH (a:Molecule { gid:8 }), (b:ChemicalTransformation { gid:111 }) MERGE (a)<-[:PRODUCT]-(b) ;
+MATCH (a:Molecule { gid:5 }), (b:ChemicalTransformation { gid:112 }) MERGE (a)<-[:PRODUCT]-(b) ;
+MATCH (a:Molecule { gid:5 }), (b:ChemicalTransformation { gid:113 }) MERGE (a)<-[:PRODUCT]-(b) ;
+;
+MATCH (a:ChemicalTransformation { gid:101 }), (b:Molecule { gid:5 }) MERGE (a)<-[:REACTANT]-(b) ;
+MATCH (a:ChemicalTransformation { gid:107 }), (b:Molecule { gid:9 }) MERGE (a)<-[:REACTANT]-(b) ;
+MATCH (a:ChemicalTransformation { gid:108 }), (b:Molecule { gid:10 }) MERGE (a)<-[:REACTANT]-(b) ;
+MATCH (a:ChemicalTransformation { gid:109 }), (b:Molecule { gid:11 }) MERGE (a)<-[:REACTANT]-(b) ;
+MATCH (a:ChemicalTransformation { gid:110 }), (b:Molecule { gid:12 }) MERGE (a)<-[:REACTANT]-(b) ;
+MATCH (a:ChemicalTransformation { gid:111 }), (b:Molecule { gid:13 }) MERGE (a)<-[:REACTANT]-(b) ;
+MATCH (a:ChemicalTransformation { gid:112 }), (b:Molecule { gid:2 }) MERGE (a)<-[:REACTANT]-(b) ;
+MATCH (a:ChemicalTransformation { gid:113 }), (b:Molecule { gid:14 }) MERGE (a)<-[:REACTANT]-(b) ;",14,1,false
+Ingest augmented example dataset,,"MERGE (:Molecule { gid:1 })
+MERGE (:Molecule { gid:2 })
+MERGE (:Molecule { gid:3 })
+MERGE (:Molecule { gid:4 })
+MERGE (:Molecule { gid:5 })
+MERGE (:Molecule { gid:6 })
+MERGE (:Molecule { gid:7 })
+MERGE (:Molecule { gid:8 })
+MERGE (:Molecule { gid:9 })
+MERGE (:Molecule { gid:10 })
+MERGE (:Molecule { gid:11 })
+MERGE (:Molecule { gid:12 })
+MERGE (:Molecule { gid:13 })
+MERGE (:Molecule { gid:14 })
+MERGE (:Molecule { gid:15 })
+MERGE (:Molecule { gid:16 })
+MERGE (:Molecule { gid:17 })
+MERGE (:Molecule { gid:18 })
+MERGE (:Molecule { gid:19 })
+MERGE (:Molecule { gid:20 })
+MERGE (:Molecule { gid:21 })
+MERGE (:Molecule { gid:22})
+MERGE (:Molecule { gid:23 })
+MERGE (:Molecule { gid:24 })
+MERGE (:Molecule { gid:25 })
+MERGE (:Molecule { gid:26})
+MERGE (:ChemicalTransformation { gid:101 })
+MERGE (:ChemicalTransformation { gid:102 })
+MERGE (:ChemicalTransformation { gid:103 })
+MERGE (:ChemicalTransformation { gid:104 })
+MERGE (:ChemicalTransformation { gid:105 })
+MERGE (:ChemicalTransformation { gid:106 })
+MERGE (:ChemicalTransformation { gid:107 })
+MERGE (:ChemicalTransformation { gid:108 })
+MERGE (:ChemicalTransformation { gid:109 })
+MERGE (:ChemicalTransformation { gid:110 })
+MERGE (:ChemicalTransformation { gid:111 })
+MERGE (:ChemicalTransformation { gid:112 })
+MERGE (:ChemicalTransformation { gid:113 })
+MERGE (:ChemicalTransformation { gid:115 })
+MERGE (:ChemicalTransformation { gid:114 })
+MERGE (:ChemicalTransformation { gid:117 })
+MERGE (:ChemicalTransformation { gid:116 })
+MERGE (:ChemicalTransformation{gid: 118})
+MERGE (:ChemicalTransformation{gid: 119})
+;
+MATCH (a:Molecule { gid:1 }), (b:ChemicalTransformation { gid:101 }) MERGE (a)<-[:PRODUCT]-(b) ;
+MATCH (a:Molecule { gid:1 }), (b:ChemicalTransformation { gid:102 }) MERGE (a)<-[:PRODUCT]-(b) ;
+MATCH (a:Molecule { gid:1 }), (b:ChemicalTransformation { gid:103 }) MERGE (a)<-[:PRODUCT]-(b) ;
+MATCH (a:ChemicalTransformation { gid:101 }), (b:Molecule { gid:2 }) MERGE (a)<-[:REACTANT]-(b) ;
+MATCH (a:ChemicalTransformation { gid:102 }), (b:Molecule { gid:2 }) MERGE (a)<-[:REACTANT]-(b) ;
+MATCH (a:ChemicalTransformation { gid:102 }), (b:Molecule { gid:3 }) MERGE (a)<-[:REACTANT]-(b) ;
+MATCH (a:ChemicalTransformation { gid:103 }), (b:Molecule { gid:2 }) MERGE (a)<-[:REACTANT]-(b) ;
+MATCH (a:ChemicalTransformation { gid:103 }), (b:Molecule { gid:3 }) MERGE (a)<-[:REACTANT]-(b) ;
+MATCH (a:ChemicalTransformation { gid:103 }), (b:Molecule { gid:4 }) MERGE (a)<-[:REACTANT]-(b) ;
+MATCH (a:Molecule { gid:2 }), (b:ChemicalTransformation { gid:104 }) MERGE (a)<-[:PRODUCT]-(b) ;
+MATCH (a:Molecule { gid:4 }), (b:ChemicalTransformation { gid:105 }) MERGE (a)<-[:PRODUCT]-(b) ;
+MATCH (a:Molecule { gid:4 }), (b:ChemicalTransformation { gid:106 }) MERGE (a)<-[:PRODUCT]-(b) ;
+MATCH (a:ChemicalTransformation { gid:104 }), (b:Molecule { gid:5 }) MERGE (a)<-[:REACTANT]-(b) ;
+MATCH (a:ChemicalTransformation { gid:105 }), (b:Molecule { gid:6 }) MERGE (a)<-[:REACTANT]-(b) ;
+MATCH (a:ChemicalTransformation { gid:105 }), (b:Molecule { gid:7 }) MERGE (a)<-[:REACTANT]-(b) ;
+MATCH (a:ChemicalTransformation { gid:106 }), (b:Molecule { gid:8 }) MERGE (a)<-[:REACTANT]-(b) ;
+;
+MATCH (a:Molecule { gid:7 }), (b:ChemicalTransformation { gid:103 }) MERGE (a)<-[:PRODUCT]-(b) ;
+MATCH (a:Molecule { gid:3 }), (b:ChemicalTransformation { gid:107 }) MERGE (a)<-[:PRODUCT]-(b) ;
+MATCH (a:Molecule { gid:2 }), (b:ChemicalTransformation { gid:107 }) MERGE (a)<-[:PRODUCT]-(b) ;
+MATCH (a:Molecule { gid:9 }), (b:ChemicalTransformation { gid:108 }) MERGE (a)<-[:PRODUCT]-(b) ;
+MATCH (a:Molecule { gid:9 }), (b:ChemicalTransformation { gid:109 }) MERGE (a)<-[:PRODUCT]-(b) ;
+MATCH (a:Molecule { gid:8 }), (b:ChemicalTransformation { gid:110 }) MERGE (a)<-[:PRODUCT]-(b) ;
+MATCH (a:Molecule { gid:8 }), (b:ChemicalTransformation { gid:111 }) MERGE (a)<-[:PRODUCT]-(b) ;
+MATCH (a:Molecule { gid:5 }), (b:ChemicalTransformation { gid:112 }) MERGE (a)<-[:PRODUCT]-(b) ;
+MATCH (a:Molecule { gid:5 }), (b:ChemicalTransformation { gid:113 }) MERGE (a)<-[:PRODUCT]-(b) ;
+;
+MATCH (a:ChemicalTransformation { gid:101 }), (b:Molecule { gid:5 }) MERGE (a)<-[:REACTANT]-(b) ;
+MATCH (a:ChemicalTransformation { gid:107 }), (b:Molecule { gid:9 }) MERGE (a)<-[:REACTANT]-(b) ;
+MATCH (a:ChemicalTransformation { gid:108 }), (b:Molecule { gid:10 }) MERGE (a)<-[:REACTANT]-(b) ;
+MATCH (a:ChemicalTransformation { gid:109 }), (b:Molecule { gid:11 }) MERGE (a)<-[:REACTANT]-(b) ;
+MATCH (a:ChemicalTransformation { gid:110 }), (b:Molecule { gid:12 }) MERGE (a)<-[:REACTANT]-(b) ;
+MATCH (a:ChemicalTransformation { gid:111 }), (b:Molecule { gid:13 }) MERGE (a)<-[:REACTANT]-(b) ;
+MATCH (a:ChemicalTransformation { gid:112 }), (b:Molecule { gid:2 }) MERGE (a)<-[:REACTANT]-(b) ;
+MATCH (a:ChemicalTransformation { gid:113 }), (b:Molecule { gid:14 }) MERGE (a)<-[:REACTANT]-(b) ;
+
+
+MATCH (a:Molecule { gid:15 }), (b:ChemicalTransformation { gid:114 }) MERGE (a)-[:REACTANT]->(b) ;
+MATCH (a:Molecule { gid:16 }), (b:ChemicalTransformation { gid:114 }) MERGE (a)-[:REACTANT]->(b) ;
+MATCH (a:Molecule { gid:17 }), (b:ChemicalTransformation { gid:115 }) MERGE (a)-[:REACTANT]->(b) ;
+MATCH (a:Molecule { gid:18 }), (b:ChemicalTransformation { gid:115 }) MERGE (a)-[:REACTANT]->(b) ;
+MATCH (a:Molecule { gid:10 }), (b:ChemicalTransformation { gid:114 }) MERGE (b)-[:PRODUCT]-(a) ;
+MATCH (a:Molecule { gid:10 }), (b:ChemicalTransformation { gid:115 }) MERGE (b)-[:PRODUCT]-(a) ;
+MATCH (a:Molecule { gid:16 }), (b:ChemicalTransformation { gid:118 }),(c:ChemicalTransformation { gid:119 }) 
+MERGE (b)-[:PRODUCT]->(a)
+MERGE (c)-[:PRODUCT]->(a);
+MATCH (a:Molecule { gid:23 }), (b:ChemicalTransformation { gid:118 }) MERGE (a)-[:REACTANT]->(b) ;
+MATCH (a:Molecule { gid:24 }), (b:ChemicalTransformation { gid:118 }) MERGE (a)-[:REACTANT]->(b) ;
+MATCH (a:Molecule { gid:25 }), (b:ChemicalTransformation { gid:119 }) MERGE (a)-[:REACTANT]->(b) ;
+MATCH (a:Molecule { gid:26 }), (b:ChemicalTransformation { gid:119 }) MERGE (a)-[:REACTANT]->(b) ;
+
+MATCH (a:Molecule { gid:15 }), (b:ChemicalTransformation { gid:116 }),(c:ChemicalTransformation { gid:117 }) 
+MERGE (b)-[:PRODUCT]->(a)
+MERGE (c)-[:PRODUCT]->(a);
+MATCH (a:Molecule { gid:16 }), (b:ChemicalTransformation { gid:118 }),(c:ChemicalTransformation { gid:119 }) 
+MERGE (b)-[:PRODUCT]->(a)
+MERGE (c)-[:PRODUCT]->(a);
+
+MATCH (a:Molecule { gid:19 }), (b:ChemicalTransformation { gid:116 }) MERGE (a)-[:REACTANT]->(b) ;
+MATCH (a:Molecule { gid:20 }), (b:ChemicalTransformation { gid:116 }) MERGE (a)-[:REACTANT]->(b) ;
+MATCH (a:Molecule { gid:21 }), (b:ChemicalTransformation { gid:117 }) MERGE (a)-[:REACTANT]->(b) ;
+MATCH (a:Molecule { gid:22 }), (b:ChemicalTransformation { gid:117 }) MERGE (a)-[:REACTANT]->(b) ;",15,1,false
+show naked graph,,"MATCH (n:Molecule|!Recipe)
+OPTIONAL MATCH (n)-[r:!IS_RECIPE_FOR]->(:Molecule|!Recipe)
+RETURN n, r",16,1,false
+🎯  constraint index recipe,,"CREATE CONSTRAINT recipe_rid IF NOT EXISTS
+FOR (r:Recipe) REQUIRE (r.rid) IS NODE KEY",17,10,false
+🎯 init inference,,"MATCH(m:Molecule&!Recipe)
+SET m:Recipe, m.rid = 'molecule(' || toString(m.gid) || ')', m.full_recipe = '{molecule_gid:' || toString(m.gid) || '}', m:Full
+MERGE (m)-[:IS_RECIPE_FOR]->(m);",18,10,false
+infer until converges,,,19,10,true
+declare not new rel,,"MATCH ()-[r:IS_RECIPE_FOR {new:true}]->()
+SET r.new = false;",20,19,false
+reactant to transformation step,,"MATCH (ct:ChemicalTransformation)<-[:REACTANT]-(r)
+WITH ct, r ORDER BY ct.gid, r.gid ASC
+// We don't want to build cyclic recipes because we want to converge
+WITH ct, r, [(r)<-[:IS_RECIPE_FOR]-(recipe) WHERE NOT EXISTS {(recipe)<-[:IS_SUB_RECIPE_OF]-*(subrec)-[:IS_RECIPE_FOR]->(ct)}|recipe] AS recipies
+WITH ct, collect(recipies) AS reactantRecipiesSetsList
+// Using 1 recipe for each reactant as building bricks
+// Trickiest part of the query
+WITH ct, reduce (acc= [[]], sets IN reactantRecipiesSetsList|
+  apoc.coll.flatten([l IN sets | [ll IN acc| l+ll]])) AS reactantRecipiesSetsSet
+UNWIND reactantRecipiesSetsSet AS reactantRecipiesSet
+UNWIND reactantRecipiesSet AS reactantRecipe
+WITH ct, reactantRecipiesSet, reactantRecipe ORDER BY reactantRecipe.rid
+WITH ct, reactantRecipiesSet, collect(reactantRecipe) AS OrderedReactantRecipiesSet
+// Building a deterministic unique recipe id to merge on (let's converge eventually)
+WITH ct, OrderedReactantRecipiesSet, '[' || toString(ct.gid) || '(' || apoc.text.join([rec IN OrderedReactantRecipiesSet | 'recipe('|| toString(rec.rid)||')'], ',') || ')]' AS rid
+MERGE (new_rec:Recipe {rid:rid})
+MERGE (new_rec)-[newr:IS_RECIPE_FOR]->(ct)
+  ON CREATE SET newr.new = true
+WITH ct, new_rec, OrderedReactantRecipiesSet
+UNWIND OrderedReactantRecipiesSet AS reactantRecipe
+MERGE (new_rec)<-[:IS_SUB_RECIPE_OF]-(reactantRecipe);",21,19,false
+transformation to product step,,"MATCH (m:Molecule)<-[:PRODUCT]-(r)<-[ri:IS_RECIPE_FOR]->(rec)
+// We don't want to build cyclic recipes because we want to converge
+WHERE NOT EXISTS {(rec)<-[:IS_SUB_RECIPE_OF]-*(m)}
+MERGE (newrec:Recipe {rid:'product('||rec.rid||'-->'||toString(m.rid)})
+MERGE (newrec)<-[:IS_SUB_RECIPE_OF]-(rec)
+MERGE (newrec)-[newr:IS_RECIPE_FOR]->(m)
+  ON CREATE SET newr.new = true;
+",22,19,false
+count changes,,"MATCH ()-[r:IS_RECIPE_FOR {new:true}]->()
+WITH count (r) AS limit
+RETURN limit;",23,19,false
+🎯  iterate in batches,,"CALL apoc.periodic.commit(""
+  CALL apoc.cypher.runMany(\""
+
+MATCH ()-[r:IS_RECIPE_FOR {new:true}]->()
+SET r.new = false;
+
+MATCH (ct:ChemicalTransformation)<-[:REACTANT]-(r)
+WITH ct, r ORDER BY ct.gid, r.gid ASC
+WITH ct, r, [(r)<-[:IS_RECIPE_FOR]-(recipe) WHERE NOT EXISTS {(recipe)<-[:IS_SUB_RECIPE_OF]-*(subrec)-[:IS_RECIPE_FOR]->(ct)}|recipe] AS recipies
+WITH ct, collect(recipies) AS reactantRecipiesSetsList
+WITH ct, reduce (acc= [[]], sets IN reactantRecipiesSetsList|
+  apoc.coll.flatten([l IN sets | [ll IN acc| l+ll]])) AS reactantRecipiesSetsSet
+UNWIND reactantRecipiesSetsSet AS reactantRecipiesSet
+UNWIND reactantRecipiesSet AS reactantRecipe
+WITH ct, reactantRecipiesSet, reactantRecipe ORDER BY reactantRecipe.rid
+WITH ct, reactantRecipiesSet, collect(reactantRecipe) AS OrderedReactantRecipiesSet
+WITH ct, OrderedReactantRecipiesSet, '[' || toString(ct.gid) || '(' || apoc.text.join([rec IN OrderedReactantRecipiesSet | 'recipe('|| toString(rec.rid)||')'], ',') || ')]' AS rid
+MERGE (new_rec:Recipe {rid:rid})
+MERGE (new_rec)-[newr:IS_RECIPE_FOR]->(ct)
+  ON CREATE SET newr.new = true
+WITH ct, new_rec, OrderedReactantRecipiesSet
+UNWIND OrderedReactantRecipiesSet AS reactantRecipe
+MERGE (new_rec)<-[:IS_SUB_RECIPE_OF]-(reactantRecipe);
+
+
+MATCH (m:Molecule)<-[:PRODUCT]-(r)<-[ri:IS_RECIPE_FOR]->(rec)
+WHERE NOT EXISTS {(rec)<-[:IS_SUB_RECIPE_OF]-*(m)}
+MERGE (newrec:Recipe {rid:'product('||rec.rid||'-->'||toString(m.rid)})
+MERGE (newrec)<-[:IS_SUB_RECIPE_OF]-(rec)
+MERGE (newrec)-[newr:IS_RECIPE_FOR]->(m)
+  ON CREATE SET newr.new = true;
+
+
+MATCH ()-[r:IS_RECIPE_FOR {new:true}]->()
+WITH count (r) AS limit
+RETURN limit;
+
+
+ \"",
+  {}) YIELD result
+WITH result
+WHERE result.limit IS NOT null
+WITH result.limit AS limit
+RETURN limit;
+"", {parallel:true});",24,19,false
+build recipes step (repeat until converges),,"MATCH (rec:Recipe&!Full)-[:IS_RECIPE_FOR]->(ct:ChemicalTransformation)
+WHERE NOT EXISTS {(rec)<-[:IS_SUB_RECIPE_OF]-(:!Full)}
+MATCH (rec)<-[:IS_SUB_RECIPE_OF]-(subrec:Full)
+WITH ct, rec, subrec ORDER BY subrec.rid ASC
+WITH ct, rec, collect(subrec) AS subrecs
+SET rec.full_recipe = '{transform_gid:'||toString(ct.gid)||', reactant_recipes:['||apoc.text.join([subrec IN subrecs | subrec.full_recipe], ',')||']}', rec:Full;
+
+MATCH (rec:Recipe&!Full)-[:IS_RECIPE_FOR]->(m:Molecule)
+WHERE NOT EXISTS {(rec)<-[:IS_SUB_RECIPE_OF]-(:!Full)}
+MATCH (rec)<-[:IS_SUB_RECIPE_OF]-(subrec:Full)
+SET rec.full_recipe = '{product_gid:'||toString(m.gid)||', transformation_recipe:'||subrec.full_recipe||'}', rec:Full;",25,10,false
+🎯  build recipies until converges,,"CALL apoc.periodic.commit(""
+  CALL apoc.cypher.runMany(\""
+
+MATCH (rec:Recipe&!Full)-[:IS_RECIPE_FOR]->(ct:ChemicalTransformation)
+WHERE NOT EXISTS {(rec)<-[:IS_SUB_RECIPE_OF]-(:!Full)}
+MATCH (rec)<-[:IS_SUB_RECIPE_OF]-(subrec:Full)
+WITH ct, rec, subrec ORDER BY subrec.rid ASC
+WITH ct, rec, collect(subrec) AS subrecs
+SET rec.full_recipe = '{transform_gid:'||toString(ct.gid)||', reactant_recipes:['||apoc.text.join([subrec IN subrecs | subrec.full_recipe], ',')||']}', rec:Full;
+
+MATCH (rec:Recipe&!Full)-[:IS_RECIPE_FOR]->(m:Molecule)
+WHERE NOT EXISTS {(rec)<-[:IS_SUB_RECIPE_OF]-(:!Full)}
+MATCH (rec)<-[:IS_SUB_RECIPE_OF]-(subrec:Full)
+SET rec.full_recipe = '{product_gid:'||toString(m.gid)||', transformation_recipe:'||subrec.full_recipe||'}', rec:Full;
+
+MATCH (rec:Recipe&!Full)
+WITH count(rec) AS limit
+RETURN limit;
+\"",
+  {}) YIELD result
+WITH result
+WHERE result.limit IS NOT null
+WITH result.limit AS limit
+RETURN limit;
+"", {parallel:true});",26,10,false
+🎯  get recipes for molecule 0,,"MATCH (:Molecule {gid:0})<-[:IS_RECIPE_FOR]-(r:Recipe)
+RETURN r.full_recipe",27,10,false
